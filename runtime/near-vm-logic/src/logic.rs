@@ -1263,7 +1263,9 @@ impl<'a> VMLogic<'a> {
             }
         };
 
-        let mut pubkeys: Vec<blst::min_pk::PublicKey> = vec![];
+        let mut pubkeys: Vec<blst::min_pk::PublicKey> =
+            Vec::with_capacity(pubkeys_cnt.try_into().unwrap());
+ 
         for i in 0..pubkeys_cnt {
             pubkeys.push(
                 match blst::min_pk::PublicKey::key_validate(
@@ -1271,22 +1273,19 @@ impl<'a> VMLogic<'a> {
                 ) {
                     Ok(pubkey) => pubkey,
                     Err(err) => {
-                        return Err(VMLogicError::from(Bls1238VerifyError(Bls12381Error::from(err))))
+                        return Err(VMLogicError::from(Bls1238VerifyError(Bls12381Error::from(
+                            err,
+                        ))))
                     }
                 },
             );
-        }
-
-        let mut pubkeys_refs: Vec<&blst::min_pk::PublicKey> = vec![];
-        for i in 0..pubkeys.len() {
-            pubkeys_refs.push(&pubkeys[i]);
         }
 
         let res = aggregate_sig.fast_aggregate_verify(
             true,
             &message,
             b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_",
-            pubkeys_refs.as_slice(),
+            &pubkeys.iter().collect::<Vec<_>>(),
         );
 
         match res {
