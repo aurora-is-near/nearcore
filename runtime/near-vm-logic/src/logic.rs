@@ -1250,10 +1250,10 @@ impl<'a> VMLogic<'a> {
             self.get_vec_from_memory_or_register(aggregate_signature_ptr, aggregate_signature_len)?;
         let message = self.get_vec_from_memory_or_register(msg_ptr, msg_len)?;
         let pubkeys_raw = self.get_vec_from_memory_or_register(pubkeys_ptr, pubkeys_len)?;
-        let pubkeys_cnt = (pubkeys_raw.len() as u64) / PUBKEY_LEN;
+        let num_pubkeys = (pubkeys_raw.len() as u64) / PUBKEY_LEN;
 
         self.gas_counter.pay_per(bls12381_verify_byte, message.len() as u64)?;
-        self.gas_counter.pay_per(bls12381_verify_elements, pubkeys_cnt)?;
+        self.gas_counter.pay_per(bls12381_verify_elements, num_pubkeys)?;
 
         let aggregate_sig = match blst::min_pk::Signature::sig_validate(&aggregate_signature, false)
         {
@@ -1264,9 +1264,9 @@ impl<'a> VMLogic<'a> {
         };
 
         let mut pubkeys: Vec<blst::min_pk::PublicKey> =
-            Vec::with_capacity(pubkeys_cnt.try_into().unwrap());
- 
-        for i in 0..pubkeys_cnt {
+            Vec::with_capacity(num_pubkeys.try_into().unwrap());
+
+        for i in 0..num_pubkeys {
             pubkeys.push(
                 match blst::min_pk::PublicKey::key_validate(
                     &pubkeys_raw[((i * PUBKEY_LEN) as usize)..(((i + 1) * PUBKEY_LEN) as usize)],
