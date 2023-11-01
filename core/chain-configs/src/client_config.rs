@@ -180,6 +180,18 @@ impl Default for StateSplitConfig {
     }
 }
 
+#[derive(Clone, serde::Serialize)]
+pub struct SidecarConfigUris {
+    pub get: String,
+    pub set: String,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub struct SidecarConfig {
+    pub enabled: bool,
+    pub uris: SidecarConfigUris,
+}
+
 /// ClientConfig where some fields can be updated at runtime.
 #[derive(Clone, serde::Serialize)]
 pub struct ClientConfig {
@@ -292,6 +304,7 @@ pub struct ClientConfig {
     pub enable_multiline_logging: bool,
     // Configuration for resharding.
     pub state_split_config: StateSplitConfig,
+    pub sidecar: Option<SidecarConfig>,
 }
 
 impl ClientConfig {
@@ -368,6 +381,7 @@ impl ClientConfig {
             transaction_pool_size_limit: None,
             enable_multiline_logging: false,
             state_split_config: StateSplitConfig::default(),
+            sidecar: None,
         }
     }
 }

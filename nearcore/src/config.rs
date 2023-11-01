@@ -686,6 +686,7 @@ impl NearConfig {
                 transaction_pool_size_limit: config.transaction_pool_size_limit,
                 enable_multiline_logging: config.enable_multiline_logging.unwrap_or(true),
                 state_split_config: config.state_split_config,
+                sidecar: None,
             },
             network_config: NetworkConfig::new(
                 config.network,
