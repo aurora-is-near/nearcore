@@ -10,6 +10,9 @@ use crate::sync::header::HeaderSync;
 use crate::sync::state::{StateSync, StateSyncResult};
 use crate::{metrics, SyncStatus};
 use actix_rt::ArbiterHandle;
+use futures::executor::block_on;
+use futures::StreamExt;
+use itertools::{Either, Itertools};
 use lru::LruCache;
 use near_async::messaging::{CanSend, Sender};
 use near_chain::chain::VerifyBlockHashAndSignatureResult;
@@ -1639,7 +1642,41 @@ impl Client {
             &self.shard_tracker,
         )?;
         persist_chunk(partial_chunk.clone(), Some(shard_chunk), self.chain.mut_store())?;
-        self.on_chunk_header_ready_for_inclusion(encoded_chunk.cloned_header(), validator_id);
+        let chunk_header = encoded_chunk.cloned_header();
+
+        info!(
+            target = "sidecar",
+            "set - prev_hash: {}, shard_id: {}",
+            chunk_header.prev_block_hash().to_string(),
+            partial_chunk.shard_id().to_string(),
+        );
+
+        if let Some(sidecar) = &self.config.sidecar {
+            if sidecar.enabled {
+                use borsh::BorshSerialize;
+
+                let prev_hash = *chunk_header.prev_block_hash();
+                let partial_chunk = partial_chunk.clone();
+                let url = sidecar.uris.set.clone();
+                tokio::spawn(async move {
+                    let client = reqwest::blocking::Client::new();
+                    let mut buffer: Vec<u8> = Vec::new();
+                    let _ = partial_chunk.serialize(&mut buffer);
+                    let request = client
+                        .post(url)
+                        .query(&[
+                            ("prev_hash", prev_hash.to_string()),
+                            ("shard_id", partial_chunk.shard_id().to_string()),
+                        ])
+                        .body(buffer);
+                    match request.send() {
+                        Ok(_) => {}
+                        Err(error) => tracing::error!("{error:?}"),
+                    }
+                });
+            }
+        }
+        self.on_chunk_header_ready_for_inclusion(chunk_header, validator_id);
         self.shards_manager_adapter.send(ShardsManagerRequestFromClient::DistributeEncodedChunk {
             partial_chunk,
             encoded_chunk,
@@ -1654,31 +1691,151 @@ impl Client {
         blocks_missing_chunks: Vec<BlockMissingChunks>,
         orphans_missing_chunks: Vec<OrphanMissingChunks>,
     ) {
+        let mut top_futures = futures::stream::FuturesUnordered::new();
         let now = StaticClock::utc();
         for BlockMissingChunks { prev_hash, missing_chunks } in blocks_missing_chunks {
             for chunk in &missing_chunks {
+                info!(
+                    target = "sidecar",
+                    "get - prev_hash: {}, shard_id: {}",
+                    prev_hash.to_string(),
+                    chunk.shard_id().to_string(),
+                );
                 self.chain.blocks_delay_tracker.mark_chunk_requested(chunk, now);
             }
-            self.shards_manager_adapter.send(ShardsManagerRequestFromClient::RequestChunks {
-                chunks_to_request: missing_chunks,
-                prev_hash,
+
+            let mut futures = futures::stream::FuturesUnordered::new();
+            if let Some(sidecar) = &self.config.sidecar {
+                if sidecar.enabled {
+                    use borsh::BorshDeserialize;
+
+                    for chunk in missing_chunks {
+                        let url = sidecar.uris.get.clone();
+                        futures.push(async move {
+                            let client = reqwest::Client::new();
+                            let request = client.get(url).query(&[
+                                ("prev_hash", prev_hash.to_string()),
+                                ("shard_id", chunk.shard_id().to_string()),
+                            ]);
+
+                            match request.send().await.map(|response| response.error_for_status()) {
+                                Ok(Ok(response)) => Either::Left(
+                                    PartialEncodedChunk::deserialize(
+                                        &mut response.bytes().await.unwrap().as_ref(),
+                                    )
+                                    .unwrap(),
+                                ),
+                                Err(error) | Ok(Err(error)) => {
+                                    tracing::error!("{error:?}");
+                                    Either::Right(chunk)
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+
+            let shards_manager_adapter = self.shards_manager_adapter.clone();
+            top_futures.push(async move {
+                let mut v: Vec<_> = vec![];
+                while let Some(item) = futures.next().await {
+                    v.push(item);
+                }
+                let (chunks, missing_chunks): (Vec<_>, Vec<_>) = v.into_iter().partition_map(|v| v);
+
+                shards_manager_adapter.send(ShardsManagerRequestFromClient::RequestChunks {
+                    chunks_to_request: missing_chunks,
+                    prev_hash,
+                });
+
+                chunks
             });
         }
 
+        let shards_manager_adapter = self.shards_manager_adapter.clone();
+        block_on(async move {
+            while let Some(chunks) = top_futures.next().await {
+                for chunk in chunks {
+                    shards_manager_adapter
+                        .send(ShardsManagerRequestFromClient::ProcessPartialEncodedChunk(chunk));
+                }
+            }
+        });
+
+        let mut top_futures = futures::stream::FuturesUnordered::new();
         for OrphanMissingChunks { missing_chunks, epoch_id, ancestor_hash } in
             orphans_missing_chunks
         {
             for chunk in &missing_chunks {
+                info!(
+                    target = "sidecar",
+                    "get - ancestor_hash: {}, shard_id: {}",
+                    ancestor_hash.to_string(),
+                    chunk.shard_id().to_string(),
+                );
                 self.chain.blocks_delay_tracker.mark_chunk_requested(chunk, now);
             }
-            self.shards_manager_adapter.send(
-                ShardsManagerRequestFromClient::RequestChunksForOrphan {
-                    chunks_to_request: missing_chunks,
-                    epoch_id,
-                    ancestor_hash,
-                },
-            );
+
+            let mut futures = futures::stream::FuturesUnordered::new();
+            if let Some(sidecar) = &self.config.sidecar {
+                if sidecar.enabled {
+                    use borsh::BorshDeserialize;
+
+                    for chunk in missing_chunks {
+                        let url = sidecar.uris.get.clone();
+                        futures.push(async move {
+                            let client = reqwest::Client::new();
+                            let request = client.get(url).query(&[
+                                ("prev_hash", ancestor_hash.to_string()),
+                                ("shard_id", chunk.shard_id().to_string()),
+                            ]);
+
+                            match request.send().await.map(|response| response.error_for_status()) {
+                                Ok(Ok(response)) => Either::Left(
+                                    PartialEncodedChunk::deserialize(
+                                        &mut response.bytes().await.unwrap().as_ref(),
+                                    )
+                                    .unwrap(),
+                                ),
+                                Err(error) | Ok(Err(error)) => {
+                                    tracing::error!("{error:?}");
+                                    Either::Right(chunk)
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+
+            let shards_manager_adapter = self.shards_manager_adapter.clone();
+            top_futures.push(async move {
+                let mut v: Vec<_> = vec![];
+                while let Some(item) = futures.next().await {
+                    v.push(item);
+                }
+                let (chunks, missing_chunks): (Vec<_>, Vec<_>) = v.into_iter().partition_map(|v| v);
+
+                shards_manager_adapter.send(
+                    ShardsManagerRequestFromClient::RequestChunksForOrphan {
+                        chunks_to_request: missing_chunks,
+                        epoch_id,
+                        ancestor_hash,
+                    },
+                );
+
+                chunks
+            });
         }
+
+        let shards_manager_adapter = self.shards_manager_adapter.clone();
+        block_on(async move {
+            while let Some(chunks) = top_futures.next().await {
+                for chunk in chunks {
+                    shards_manager_adapter
+                        .send(ShardsManagerRequestFromClient::ProcessPartialEncodedChunk(chunk));
+                }
+            }
+        });
     }
 
     /// Check if any block with missing chunks is ready to be processed

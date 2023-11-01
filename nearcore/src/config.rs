@@ -691,6 +691,7 @@ impl NearConfig {
                 state_snapshot_every_n_blocks: None,
                 transaction_pool_size_limit: config.transaction_pool_size_limit,
                 enable_multiline_logging: config.enable_multiline_logging.unwrap_or(true),
+                sidecar: None,
             },
             network_config: NetworkConfig::new(
                 config.network,
