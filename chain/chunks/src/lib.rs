@@ -1364,6 +1364,12 @@ impl ShardsManager {
             parts = ?partial_encoded_chunk.get_inner().parts.iter().map(|p| p.part_ord).collect::<Vec<_>>(),
             "Process partial encoded chunk",
         );
+        tracing::info!(
+            target = "sidecar",
+            "get - prev_hash: {}, shard_id: {}",
+            header.prev_block_hash().to_string(),
+            header.shard_id().to_string(),
+        );
         // Verify the partial encoded chunk is valid and worth processing
         // 1.a Leave if we received known chunk
         if let Some(entry) = self.encoded_chunks.get(&chunk_hash) {
@@ -1962,6 +1968,17 @@ impl ShardsManager {
             } => self.request_chunks_for_orphan(chunks_to_request, &epoch_id, ancestor_hash),
             ShardsManagerRequestFromClient::CheckIncompleteChunks(prev_block_hash) => {
                 self.check_incomplete_chunks(&prev_block_hash)
+            }
+            ShardsManagerRequestFromClient::ProcessPartialEncodedChunk(partial_encoded_chunk) => {
+                tracing::info!(
+                    target = "sidecar",
+                    "get CACHE HIT - prev_hash: {}, shard_id: {}",
+                    partial_encoded_chunk.prev_block().to_string(),
+                    partial_encoded_chunk.shard_id().to_string(),
+                );
+                if let Err(e) = self.process_partial_encoded_chunk(partial_encoded_chunk.into()) {
+                    warn!(target: "chunks", "Error processing partial encoded chunk: {:?}", e);
+                }
             }
         }
     }

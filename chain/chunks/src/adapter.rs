@@ -18,7 +18,10 @@ pub enum ShardsManagerRequestFromClient {
     ProcessChunkHeaderFromBlock(ShardChunkHeader),
     /// Lets the ShardsManager know that the chain heads have been updated.
     /// For a discussion of head vs header_head, see #8154.
-    UpdateChainHeads { head: Tip, header_head: Tip },
+    UpdateChainHeads {
+        head: Tip,
+        header_head: Tip,
+    },
     /// As a chunk producer, distributes the given chunk to the other validators (by sending
     /// PartialEncodedChunk messages to them).
     /// The partial_chunk and encoded_chunk represent the same data, just in different formats.
@@ -34,7 +37,10 @@ pub enum ShardsManagerRequestFromClient {
     /// Only the parts and receipt proofs that this node cares about will be fetched; when
     /// the fetching is complete, a response of ClientAdapterForShardsManager::did_complete_chunk
     /// will be sent back to the client.
-    RequestChunks { chunks_to_request: Vec<ShardChunkHeader>, prev_hash: CryptoHash },
+    RequestChunks {
+        chunks_to_request: Vec<ShardChunkHeader>,
+        prev_hash: CryptoHash,
+    },
     /// Similar to request_chunks, but for orphan chunks. Since the chunk belongs to an orphan
     /// block, the previous block is not known and thus we cannot derive epoch information from
     /// that block. Therefore, an ancestor_hash must be provided which must correspond to a
@@ -50,4 +56,5 @@ pub enum ShardsManagerRequestFromClient {
     /// proofs, but cannot be marked as complete because the previous block isn't available),
     /// and completes them if so.
     CheckIncompleteChunks(CryptoHash),
+    ProcessPartialEncodedChunk(PartialEncodedChunk),
 }
