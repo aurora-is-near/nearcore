@@ -1886,24 +1886,36 @@ impl Client {
         )?;
         persist_chunk(partial_chunk.clone(), Some(shard_chunk), self.chain.mut_store())?;
         let chunk_header = encoded_chunk.cloned_header();
+
+        info!(
+            "set - prev_hash: {}, shard_id: {}",
+            chunk_header.prev_block_hash().to_string(),
+            partial_chunk.shard_id().to_string(),
+        );
+
         if let Some(sidecar) = &self.config.sidecar {
             if sidecar.enabled {
                 use borsh::BorshSerialize;
 
                 let prev_hash = *chunk_header.prev_block_hash();
-                let client = reqwest::blocking::Client::new();
-                let mut buffer: Vec<u8> = Vec::new();
-                let _ = shard_chunk.serialize(&mut buffer);
-                let request = client
-                    .post(sidecar.uris.set.clone())
-                    .query(&[
-                        ("prev_hash", prev_hash.to_string()),
-                        ("shard_id", shard_chunk.shard_id().to_string()),
-                    ])
-                    .body(buffer);
-                if let Err(error) = request.send() {
-                    tracing::error!("{error:?}");
-                }
+                let partial_chunk = partial_chunk.clone();
+                let url = sidecar.uris.set.clone();
+                tokio::spawn(async move {
+                    let client = reqwest::blocking::Client::new();
+                    let mut buffer: Vec<u8> = Vec::new();
+                    let _ = partial_chunk.serialize(&mut buffer);
+                    let request = client
+                        .post(url)
+                        .query(&[
+                            ("prev_hash", prev_hash.to_string()),
+                            ("shard_id", partial_chunk.shard_id().to_string()),
+                        ])
+                        .body(buffer);
+                    match request.send() {
+                        Ok(_) => {}
+                        Err(error) => tracing::error!("{error:?}"),
+                    }
+                });
             }
         }
         self.on_chunk_header_ready_for_inclusion(chunk_header, validator_id);
