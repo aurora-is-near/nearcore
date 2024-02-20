@@ -87,19 +87,19 @@ fn test_storage_after_commit_of_cold_update() {
         .build();
 
     let (storage, ..) = create_test_node_storage_with_cold(DB_VERSION, DbKind::Hot);
+    let cold_db = storage.cold_db().unwrap();
 
     let mut last_hash = *env.clients[0].chain.genesis().hash();
 
-    test_cold_genesis_update(&*storage.cold_db().unwrap(), &env.clients[0].runtime_adapter.store())
-        .unwrap();
+    test_cold_genesis_update(cold_db, &env.clients[0].runtime_adapter.store()).unwrap();
 
     let state_reads = test_get_store_reads(DBCol::State);
 
-    for h in 1..max_height {
+    for height in 1..max_height {
         let signer = InMemorySigner::from_seed("test0".parse().unwrap(), KeyType::ED25519, "test0");
-        if h == 1 {
+        if height == 1 {
             let tx = SignedTransaction::from_actions(
-                h,
+                height,
                 "test0".parse().unwrap(),
                 "test0".parse().unwrap(),
                 &signer,
@@ -113,10 +113,10 @@ fn test_storage_after_commit_of_cold_update() {
         // Don't send transactions in last two blocks. Because on last block production a chunk from
         // the next block will be produced and information about these transactions will be written
         // into db. And it is a PAIN to filter it out, especially for Receipts.
-        if h + 2 < max_height {
+        if height + 2 < max_height {
             for i in 0..5 {
                 let tx = SignedTransaction::from_actions(
-                    h * 10 + i,
+                    height * 10 + i,
                     "test0".parse().unwrap(),
                     "test0".parse().unwrap(),
                     &signer,
@@ -132,7 +132,7 @@ fn test_storage_after_commit_of_cold_update() {
             }
             for i in 0..5 {
                 let tx = SignedTransaction::send_money(
-                    h * 10 + i,
+                    height * 10 + i,
                     "test0".parse().unwrap(),
                     "test1".parse().unwrap(),
                     &signer,
@@ -143,7 +143,7 @@ fn test_storage_after_commit_of_cold_update() {
             }
         }
 
-        let block = env.clients[0].produce_block(h).unwrap().unwrap();
+        let block = env.clients[0].produce_block(height).unwrap().unwrap();
         env.process_block(0, block.clone(), Provenance::PRODUCED);
 
         let client = &env.clients[0];
@@ -272,23 +272,24 @@ fn test_cold_db_copy_with_height_skips() {
         .build();
 
     let (storage, ..) = create_test_node_storage_with_cold(DB_VERSION, DbKind::Hot);
+    let cold_db = storage.cold_db().unwrap();
 
     let mut last_hash = *env.clients[0].chain.genesis().hash();
 
     test_cold_genesis_update(&*storage.cold_db().unwrap(), &env.clients[0].runtime_adapter.store())
         .unwrap();
 
-    for h in 1..max_height {
+    for height in 1..max_height {
         let signer = InMemorySigner::from_seed("test0".parse().unwrap(), KeyType::ED25519, "test0");
         // It is still painful to filter out transactions in last two blocks.
         // So, as block 19 is skipped, blocks 17 and 18 shouldn't contain any transactions.
         // So, we shouldn't send any transactions between block 17 and the previous block.
         // And as block 16 is skipped, the previous block to 17 is 15.
         // Therefore, no transactions after block 15.
-        if h < 16 {
+        if height < 16 {
             for i in 0..5 {
                 let tx = SignedTransaction::send_money(
-                    h * 10 + i,
+                    height * 10 + i,
                     "test0".parse().unwrap(),
                     "test1".parse().unwrap(),
                     &signer,
@@ -300,8 +301,8 @@ fn test_cold_db_copy_with_height_skips() {
         }
 
         let block = {
-            if !skips.contains(&h) {
-                let block = env.clients[0].produce_block(h).unwrap().unwrap();
+            if !skips.contains(&height) {
+                let block = env.clients[0].produce_block(height).unwrap().unwrap();
                 env.process_block(0, block.clone(), Provenance::PRODUCED);
                 Some(block)
             } else {
