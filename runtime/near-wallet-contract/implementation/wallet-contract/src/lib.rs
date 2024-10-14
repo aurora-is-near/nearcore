@@ -34,12 +34,7 @@ const NEP_141_STORAGE_DEPOSIT_AMOUNT: NearToken = NearToken::from_yoctonear(1_25
 const NEP_141_STORAGE_DEPOSIT_GAS: Gas = Gas::from_tgas(5);
 const NEP_141_STORAGE_BALANCE_OF_GAS: Gas = Gas::from_tgas(5);
 const REGISTRAR_LOOKUP_GAS: Gas = Gas::from_tgas(5);
-const ACTION_CALLBACK_GAS: Gas = Gas::from_tgas(5);
 const FINALIZE_TX_GAS: Gas = Gas::from_tgas(5);
-const ADDRESS_CHECK_CALLBACK_GAS: Gas = Gas::from_tgas(5).saturating_add(ACTION_CALLBACK_GAS);
-const NEP_141_STORAGE_BALANCE_CALLBACK_GAS: Gas = Gas::from_tgas(5)
-    .saturating_add(NEP_141_STORAGE_DEPOSIT_GAS)
-    .saturating_add(ACTION_CALLBACK_GAS);
 
 #[near_bindgen]
 #[derive(Default, BorshDeserialize, BorshSerialize)]
@@ -175,7 +170,7 @@ impl WalletContract {
             // Recall that the nonce was not incremented in `inner_rlp_execute` in the case that
             // the registrar contract was called (i.e. in the case we end up inside this callback).
             self.nonce = self.nonce.saturating_add(1);
-            let ext = WalletContract::ext(current_account_id).with_static_gas(ACTION_CALLBACK_GAS);
+            let ext = WalletContract::ext(current_account_id).with_unused_gas_weight(1);
             match action_to_promise(target, action).map(|p| p.then(ext.action_callback())) {
                 Ok(p) => p,
                 Err(e) => {
@@ -213,7 +208,7 @@ impl WalletContract {
             },
         };
         let current_account_id = env::current_account_id();
-        let ext = WalletContract::ext(current_account_id).with_static_gas(ACTION_CALLBACK_GAS);
+        let ext = WalletContract::ext(current_account_id).with_unused_gas_weight(1);
         let promise = match maybe_storage_balance {
             Some(_) => {
                 // receiver_id is registered so we can send the transfer
@@ -427,8 +422,7 @@ fn inner_rlp_execute(
             address_check: Some(address),
             ..
         }) => {
-            let callback_gas = ADDRESS_CHECK_CALLBACK_GAS.saturating_add(action.gas());
-            let ext = WalletContract::ext(current_account_id.clone()).with_static_gas(callback_gas);
+            let ext = WalletContract::ext(current_account_id.clone()).with_unused_gas_weight(1);
             let address_registrar = {
                 let account_id = ADDRESS_REGISTRAR_ACCOUNT_ID
                     .trim()
@@ -446,9 +440,8 @@ fn inner_rlp_execute(
             // first we check if the receiver is registered and then if not call
             // `storage_deposit` in addition to `ft_transfer`.
             let token_id = target;
-            let callback_gas = NEP_141_STORAGE_BALANCE_CALLBACK_GAS.saturating_add(action.gas());
             let ext: WalletContractExt =
-                WalletContract::ext(current_account_id.clone()).with_static_gas(callback_gas);
+                WalletContract::ext(current_account_id.clone()).with_unused_gas_weight(1);
             let storage_balance_args =
                 format!(r#"{{"account_id": "{}"}}"#, receiver_id.as_str()).into_bytes();
             Promise::new(token_id.clone())
@@ -463,13 +456,12 @@ fn inner_rlp_execute(
         TransactionKind::EthEmulation(EthEmulationKind::SelfBaseTokenTransfer) => {
             // Base token transfers to self are no-ops on Near, so we do not need to
             // schedule an additional call. We can simply go straight to `action_callback`.
-            let ext: WalletContractExt = WalletContract::ext(current_account_id.clone())
-                .with_static_gas(ACTION_CALLBACK_GAS);
+            let ext: WalletContractExt =
+                WalletContract::ext(current_account_id.clone()).with_unused_gas_weight(1);
             ext.action_callback()
         }
         _ => {
-            let ext = WalletContract::ext(current_account_id.clone())
-                .with_static_gas(ACTION_CALLBACK_GAS);
+            let ext = WalletContract::ext(current_account_id.clone()).with_unused_gas_weight(1);
             action_to_promise(target, action)?.then(ext.action_callback())
         }
     };
