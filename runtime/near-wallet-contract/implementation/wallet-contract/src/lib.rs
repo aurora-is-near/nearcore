@@ -8,8 +8,8 @@ use near_sdk::{
     borsh::{BorshDeserialize, BorshSerialize},
     env,
     json_types::U64,
-    near_bindgen, AccountId, Allowance, Gas, GasWeight, NearToken, Promise, PromiseOrValue,
-    PromiseResult,
+    near_bindgen, AccountId, Allowance, Gas, GasWeight, NearToken, Promise, PromiseError,
+    PromiseOrValue, PromiseResult,
 };
 use types::{EthEmulationKind, TransactionKind};
 
@@ -34,11 +34,7 @@ const NEP_141_STORAGE_DEPOSIT_AMOUNT: NearToken = NearToken::from_yoctonear(1_25
 const NEP_141_STORAGE_DEPOSIT_GAS: Gas = Gas::from_tgas(5);
 const NEP_141_STORAGE_BALANCE_OF_GAS: Gas = Gas::from_tgas(5);
 const REGISTRAR_LOOKUP_GAS: Gas = Gas::from_tgas(5);
-const RLP_EXECUTE_CALLBACK_GAS: Gas = Gas::from_tgas(5);
-const ADDRESS_CHECK_CALLBACK_GAS: Gas = Gas::from_tgas(5).saturating_add(RLP_EXECUTE_CALLBACK_GAS);
-const NEP_141_STORAGE_BALANCE_CALLBACK_GAS: Gas = Gas::from_tgas(5)
-    .saturating_add(NEP_141_STORAGE_DEPOSIT_GAS)
-    .saturating_add(RLP_EXECUTE_CALLBACK_GAS);
+const FINALIZE_TX_GAS: Gas = Gas::from_tgas(5);
 
 #[near_bindgen]
 #[derive(Default, BorshDeserialize, BorshSerialize)]
@@ -135,9 +131,7 @@ impl WalletContract {
         &mut self,
         target: AccountId,
         action: near_action::Action,
-        caller_deposit: Option<CallerDeposit>,
     ) -> PromiseOrValue<ExecuteResponse> {
-        self.has_in_flight_tx = false;
         let maybe_account_id: Option<AccountId> = match env::promise_result(0) {
             PromiseResult::Failed => {
                 return PromiseOrValue::Value(ExecuteResponse {
@@ -176,18 +170,14 @@ impl WalletContract {
             // Recall that the nonce was not incremented in `inner_rlp_execute` in the case that
             // the registrar contract was called (i.e. in the case we end up inside this callback).
             self.nonce = self.nonce.saturating_add(1);
-            let ext =
-                WalletContract::ext(current_account_id).with_static_gas(RLP_EXECUTE_CALLBACK_GAS);
-            match action_to_promise(target, action)
-                .map(|p| p.then(ext.rlp_execute_callback(caller_deposit)))
-            {
+            let ext = WalletContract::ext(current_account_id).with_unused_gas_weight(1);
+            match action_to_promise(target, action).map(|p| p.then(ext.action_callback())) {
                 Ok(p) => p,
                 Err(e) => {
                     return PromiseOrValue::Value(e.into());
                 }
             }
         };
-        self.has_in_flight_tx = true;
         PromiseOrValue::Promise(promise)
     }
 
@@ -197,9 +187,7 @@ impl WalletContract {
         token_id: AccountId,
         receiver_id: AccountId,
         action: near_action::Action,
-        caller_deposit: Option<CallerDeposit>,
     ) -> PromiseOrValue<ExecuteResponse> {
-        self.has_in_flight_tx = false;
         let maybe_storage_balance: Option<StorageBalance> = match env::promise_result(0) {
             PromiseResult::Failed => {
                 return PromiseOrValue::Value(ExecuteResponse {
@@ -220,16 +208,14 @@ impl WalletContract {
             },
         };
         let current_account_id = env::current_account_id();
-        let ext = WalletContract::ext(current_account_id).with_static_gas(RLP_EXECUTE_CALLBACK_GAS);
+        let ext = WalletContract::ext(current_account_id).with_unused_gas_weight(1);
         let promise = match maybe_storage_balance {
             Some(_) => {
                 // receiver_id is registered so we can send the transfer
                 // without additional actions. Note: in the standard NEP-141
                 // implementation it is impossible to have `Some` storage balance,
                 // but have it be insufficient to transact.
-                match action_to_promise(token_id, action)
-                    .map(|p| p.then(ext.rlp_execute_callback(caller_deposit)))
-                {
+                match action_to_promise(token_id, action).map(|p| p.then(ext.action_callback())) {
                     Ok(p) => p,
                     Err(e) => {
                         return PromiseOrValue::Value(e.into());
@@ -265,23 +251,20 @@ impl WalletContract {
                         transfer_function_call.deposit,
                         transfer_function_call.gas,
                     )
-                    .then(ext.rlp_execute_callback(caller_deposit))
+                    .then(ext.action_callback())
             }
         };
-        self.has_in_flight_tx = true;
         PromiseOrValue::Promise(promise)
     }
 
+    /// Checks success or failure of the user's desired action
+    /// and returns an `ExecuteResponse`.
     #[private]
-    pub fn rlp_execute_callback(
-        &mut self,
-        caller_deposit: Option<CallerDeposit>,
-    ) -> ExecuteResponse {
-        self.has_in_flight_tx = false;
+    pub fn action_callback(&mut self) -> ExecuteResponse {
         let n = env::promise_results_count();
 
         if n == 0 {
-            // `rlp_execute_callback` is called directly in the case of an emulated self-transfer.
+            // `action_callback` is called directly in the case of an emulated self-transfer.
             return ExecuteResponse { success: true, success_value: None, error: None };
         } else if n > 1 {
             return ExecuteResponse {
@@ -294,25 +277,50 @@ impl WalletContract {
         }
 
         match env::promise_result(0) {
-            PromiseResult::Failed => {
-                // The cross-contract call failed, refund the caller if needed
-                if let Some(CallerDeposit { account_id, yocto_near }) = caller_deposit {
-                    let refund_promise = env::promise_batch_create(&account_id);
-                    env::promise_batch_action_transfer(
-                        refund_promise,
-                        NearToken::from_yoctonear(yocto_near.into()),
-                    );
-                }
-
-                ExecuteResponse {
-                    success: false,
-                    success_value: None,
-                    error: Some("Failed Near promise".into()),
-                }
-            }
+            PromiseResult::Failed => ExecuteResponse {
+                success: false,
+                success_value: None,
+                error: Some("Failed Near promise".into()),
+            },
             PromiseResult::Successful(value) => {
                 ExecuteResponse { success: true, success_value: Some(value), error: None }
             }
+        }
+    }
+
+    #[private]
+    pub fn finalize_tx(
+        &mut self,
+        caller_deposit: Option<CallerDeposit>,
+        #[callback_result] outcome: Result<ExecuteResponse, PromiseError>,
+    ) -> ExecuteResponse {
+        self.has_in_flight_tx = false;
+
+        // The caller gets their tokens back if the
+        // action was not executed successfully.
+        let refund_needed = outcome.as_ref().map_or(true, |r| !r.success);
+        if refund_needed {
+            if let Some(CallerDeposit { account_id, yocto_near }) = caller_deposit {
+                let refund_promise = env::promise_batch_create(&account_id);
+                env::promise_batch_action_transfer(
+                    refund_promise,
+                    NearToken::from_yoctonear(yocto_near.into()),
+                );
+            }
+        }
+
+        match outcome {
+            Ok(response) => response,
+            // If the prior receipt was an error then something went wrong
+            // internally (e.g. a receipt ran out of gas or there was not enough
+            // balance on the account for a storage deposit). If the user's action
+            // failed then `action_callback` would have returned an `ExecuteResponse`
+            // with `success: false`.
+            Err(_) => ExecuteResponse {
+                success: false,
+                success_value: None,
+                error: Some("Internal wallet contract failure".into()),
+            },
         }
     }
 
@@ -414,8 +422,7 @@ fn inner_rlp_execute(
             address_check: Some(address),
             ..
         }) => {
-            let callback_gas = ADDRESS_CHECK_CALLBACK_GAS.saturating_add(action.gas());
-            let ext = WalletContract::ext(current_account_id).with_static_gas(callback_gas);
+            let ext = WalletContract::ext(current_account_id.clone()).with_unused_gas_weight(1);
             let address_registrar = {
                 let account_id = ADDRESS_REGISTRAR_ACCOUNT_ID
                     .trim()
@@ -424,11 +431,7 @@ fn inner_rlp_execute(
                 ext_registrar::ext(account_id).with_static_gas(REGISTRAR_LOOKUP_GAS)
             };
             let address = format!("0x{}", hex::encode(address));
-            address_registrar.lookup(address).then(ext.address_check_callback(
-                target,
-                action,
-                caller_deposit,
-            ))
+            address_registrar.lookup(address).then(ext.address_check_callback(target, action))
         }
         TransactionKind::EthEmulation(EthEmulationKind::ERC20Transfer { receiver_id, .. }) => {
             // In the case of the emulated ERC-20 transfer, the receiving account
@@ -437,9 +440,8 @@ fn inner_rlp_execute(
             // first we check if the receiver is registered and then if not call
             // `storage_deposit` in addition to `ft_transfer`.
             let token_id = target;
-            let callback_gas = NEP_141_STORAGE_BALANCE_CALLBACK_GAS.saturating_add(action.gas());
             let ext: WalletContractExt =
-                WalletContract::ext(current_account_id).with_static_gas(callback_gas);
+                WalletContract::ext(current_account_id.clone()).with_unused_gas_weight(1);
             let storage_balance_args =
                 format!(r#"{{"account_id": "{}"}}"#, receiver_id.as_str()).into_bytes();
             Promise::new(token_id.clone())
@@ -449,27 +451,26 @@ fn inner_rlp_execute(
                     NearToken::from_yoctonear(0),
                     NEP_141_STORAGE_BALANCE_OF_GAS,
                 )
-                .then(ext.nep_141_storage_balance_callback(
-                    token_id,
-                    receiver_id,
-                    action,
-                    caller_deposit,
-                ))
+                .then(ext.nep_141_storage_balance_callback(token_id, receiver_id, action))
         }
         TransactionKind::EthEmulation(EthEmulationKind::SelfBaseTokenTransfer) => {
             // Base token transfers to self are no-ops on Near, so we do not need to
-            // schedule an additional call. We can simply go straight to `rlp_execute_callback`.
+            // schedule an additional call. We can simply go straight to `action_callback`.
             let ext: WalletContractExt =
-                WalletContract::ext(current_account_id).with_static_gas(RLP_EXECUTE_CALLBACK_GAS);
-            ext.rlp_execute_callback(caller_deposit)
+                WalletContract::ext(current_account_id.clone()).with_unused_gas_weight(1);
+            ext.action_callback()
         }
         _ => {
-            let ext =
-                WalletContract::ext(current_account_id).with_static_gas(RLP_EXECUTE_CALLBACK_GAS);
-            action_to_promise(target, action)?.then(ext.rlp_execute_callback(caller_deposit))
+            let ext = WalletContract::ext(current_account_id.clone()).with_unused_gas_weight(1);
+            action_to_promise(target, action)?.then(ext.action_callback())
         }
     };
-    Ok(promise)
+
+    // After handling the user action promise, call `finalize_tx`.
+    // Including this promise here ensures it will always be executed
+    // regardless of if an error occurs in trying the handle the user's action.
+    let ext = WalletContract::ext(current_account_id).with_static_gas(FINALIZE_TX_GAS);
+    Ok(promise.then(ext.finalize_tx(caller_deposit)))
 }
 
 fn action_to_promise(target: AccountId, action: near_action::Action) -> Result<Promise, Error> {

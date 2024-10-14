@@ -133,7 +133,7 @@ async fn test_base_token_transfer() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_base_token_transfer_with_relayer_refund() -> anyhow::Result<()> {
     const TRANSFER_AMOUNT: NearToken = NearToken::from_near(2);
-    const RELAYER_REFUND: NearToken = NearToken::from_millinear(1);
+    const RELAYER_REFUND: NearToken = NearToken::from_millinear(2);
     const GAS_LIMIT: u64 = 100_000;
 
     let TestContext { worker, wallet_contract, wallet_sk, wallet_contract_bytes, .. } =
